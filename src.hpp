@@ -32,23 +32,6 @@ private:
     double v_max, r;
     Monitor *monitor;
 
-    // Build a perpendicular unit vector to dir
-    static Vec perp_unit(const Vec &dir) {
-        Vec p(-dir.y, dir.x);
-        double n = p.norm();
-        return (n > 1e-9) ? (p / n) : Vec(0, 0);
-    }
-
-    // Rotate a unit direction by angle using std::cos/sin
-    static Vec rotate_dir(const Vec &dir_unit, double ang) {
-        double c = std::cos(ang);
-        double s = std::sin(ang);
-        Vec p = perp_unit(dir_unit);
-        Vec v = dir_unit * c + p * s;
-        double n = v.norm();
-        return (n > 1e-9) ? (v / n) : dir_unit;
-    }
-
     // Compute preferred velocity towards target, capped to not overshoot and not exceed v_max
     Vec preferred_velocity() const {
         Vec to_tar = pos_tar - pos_cur;
@@ -109,16 +92,15 @@ private:
     void generate_candidates(const Vec &v_pref, Vec out_list[], int &out_cnt) const {
         out_cnt = 0;
         // Speed scales (prioritized high to low)
-        const double scales[] = {1.0, 0.9, 0.75, 0.6, 0.45, 0.3, 0.15, 0.0};
+        const double scales[] = {1.0, 0.8, 0.6, 0.4, 0.2, 0.0};
         // Angles to try (radians), small detours first
-        const double angs[] = {0.0, 0.25, -0.25, 0.5, -0.5, 0.9, -0.9, 1.2, -1.2, 1.57, -1.57};
+        const double angs[] = {0.0, 0.35, -0.35, 0.7, -0.7, 1.2, -1.2};
 
         // If we have right-of-way (small id), be more assertive: try straighter angles first already done
         // For larger ids, we can bias to smaller speeds by ordering scales as above
 
-        Vec base_dir = v_pref.norm() > 1e-9 ? v_pref.normalize() : Vec(1, 0);
         for (double ang : angs) {
-            Vec dir = rotate_dir(base_dir, ang);
+            Vec dir = v_pref.norm() > 1e-9 ? v_pref.rotate(ang).normalize() : Vec(0, 0);
             for (double s : scales) {
                 Vec cand = dir * (v_pref.norm() * s);
                 // Clamp just in case
@@ -148,60 +130,14 @@ public:
         if (monitor->get_speeding(id)) had_issue = true;
         if (!monitor->get_collision(id).empty()) had_issue = true;
 
-        // We'll build candidate list below after checking detour necessity
-
-        // Pre-check: detect potential head-on corridor and prepend perpendicular detour candidates
-        bool need_detour = false;
-        Vec dir = v_pref.norm() > 1e-9 ? v_pref.normalize() : Vec(1, 0);
-        int n = monitor->get_robot_number();
-        bool yield_to_lower = false;
-        for (int j = 0; j < n; ++j) {
-            if (j == id) continue;
-            Vec pj = monitor->get_pos_cur(j);
-            Vec vj = monitor->get_v_cur(j);
-            double rj = monitor->get_r(j);
-            Vec rel = pj - pos_cur;
-            double ahead = rel.dot(dir);
-            double lateral = std::abs(rel.cross(dir));
-            double corridor = r + rj + 0.5; // margin
-            if (ahead > 0 && lateral < corridor) {
-                // approaching corridor
-                double closing = (dir.dot(vj) < 0) ? 1.0 : 0.0;
-                if (closing > 0.5) { need_detour = true; }
-                if (j < id) { yield_to_lower = true; }
-                if (need_detour && yield_to_lower) break;
-            }
-        }
-        // Simple right-of-way: yield to any lower-id robot in our corridor to avoid deadlock
-        if (yield_to_lower) {
-            return Vec(0, 0);
-        }
-
         // Build candidate list
-        Vec candidates[96];
+        Vec candidates[64];
         int cnt = 0;
-        if (need_detour) {
-            // Try perpendicular motions first, pick side by id parity for symmetry breaking
-            Vec perp = Vec(-dir.y, dir.x);
-            double sign = (id % 2 == 0) ? 1.0 : -1.0;
-            double base = std::min(v_max, std::max(0.2, v_pref.norm()));
-            Vec det1 = perp * (base * sign);
-            Vec det2 = perp * (base * -sign * 0.6) + dir * (base * 0.3);
-            // Clamp to v_max
-            auto clamp = [&](Vec v){ double sp = v.norm(); return sp > v_max ? v * (v_max / sp) : v; };
-            det1 = clamp(det1);
-            det2 = clamp(det2);
-            candidates[cnt++] = det1;
-            candidates[cnt++] = det2;
-        }
+        generate_candidates(v_pref, candidates, cnt);
 
-        // Standard candidates
-        Vec tmp_list[64]; int tmp_cnt = 0;
-        generate_candidates(v_pref, tmp_list, tmp_cnt);
-        for (int i = 0; i < tmp_cnt && cnt < 96; ++i) candidates[cnt++] = tmp_list[i];
-
-        // Optional reorder: if we had issues and have larger id, prefer slower candidates
+        // If we are a larger id, bias to slower first when had issues
         if (had_issue && id > 0) {
+            // Reorder: move slower candidates earlier (simple stable selection sort by speed asc)
             for (int i = 0; i < cnt; ++i) {
                 int best = i;
                 double best_sp = candidates[best].norm();
@@ -226,15 +162,11 @@ public:
         }
 
         // As a fallback, creep very slowly toward target (tiny speed)
-        Vec tiny = (pos_tar - pos_cur).normalize() * std::min(v_max, 0.2);
-        // Add slight perpendicular to break symmetry
-        Vec perp = Vec(-dir.y, dir.x) * (0.1 * ((id % 2 == 0) ? 1 : -1));
-        tiny += perp;
-        double sp = tiny.norm();
-        if (sp > v_max) tiny = tiny * (v_max / sp);
+        Vec tiny = (pos_tar - pos_cur).normalize() * std::min(v_max, 0.05);
         return tiny;
     }
 };
 
 
 #endif //PPCA_SRC_HPP
+
